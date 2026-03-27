@@ -81,6 +81,9 @@ export function startBot() {
 
     try {
       await message.channel.sendTyping();
+      const typingInterval = setInterval(() => {
+        message.channel.sendTyping().catch(() => {});
+      }, 8000);
 
       conversationHistory.push({
         role: "user",
@@ -96,12 +99,15 @@ export function startBot() {
         ],
       });
 
+      clearInterval(typingInterval);
+
       const reply = response.choices[0]?.message?.content ?? "...";
 
       conversationHistory.push({ role: "assistant", content: reply });
 
       await message.reply(reply);
     } catch (err) {
+      clearInterval(typingInterval);
       logger.error({ err }, "Error generating AI response");
       await message.reply("что-то сломалось, попробуй ещё раз");
     }
