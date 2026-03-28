@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { Client, GatewayIntentBits, Events } from "discord.js";
+import { Client, GatewayIntentBits, Events, PermissionFlagsBits } from "discord.js";
 import Groq from "groq-sdk";
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { fileURLToPath } from "url";
@@ -8,6 +8,8 @@ import { dirname, join } from "path";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DB_PATH = join(__dirname, "insults-db.json");
 const ALLOWED_CHANNEL_ID = "1487101381763666021";
+const RATE_LIMIT_MSG = "### __НЯШКА ОБРЫГАШКА УСТАЛА ОБЩАТЬСЯ, Я ВЕРНУСЬ ЗАВТРА ИЛИ СЕГОДНЯ, НО ЧУТЬ ПОЗЖЕ__ <:umph:1487431721916825751>";
+const CHECK_INTERVAL_MS = 30 * 60 * 1000; // 30 минут
 
 const AGGRESSION_WORDS = [
   "сука", "пизд", "ёб", "еб", "хуй", "хуе", "хуи", "блядь", "бляд",
@@ -17,6 +19,15 @@ const AGGRESSION_WORDS = [
 const MOTHER_WORDS = ["мать", "мама", "матер", "мамк", "родительниц"];
 const INTELLECT_WORDS = ["тупой", "дебил", "идиот", "мозг", "умн", "соображ"];
 const CATEGORIES = ["про_мать", "интеллект", "сравнения", "общие"];
+
+// Флаги для Components V2 (IS_COMPONENTS_V2 = 1 << 15 = 32768)
+const IS_COMPONENTS_V2 = 1 << 15;
+// TextDisplay component type = 17
+const TEXT_DISPLAY_TYPE = 17;
+
+let isRateLimited = false;
+let rateLimitedChannel = null;
+let recoveryTimer = null;
 
 function emptyDB() {
   return { про_мать: [], интеллект: [], сравнения: [], общие: [] };
@@ -80,7 +91,7 @@ function buildPrompt(userText) {
 async function enrichDB(groq, reply, userText) {
   try {
     const res = await groq.chat.completions.create({
-      model: "llama-3.1-8b-instant",
+      model: "llama-3.3-70b-versatile",
       max_tokens: 350,
       messages: [
         {
@@ -112,6 +123,85 @@ async function enrichDB(groq, reply, userText) {
   }
 }
 
+async function lockChannel(channel) {
+  try {
+    await channel.permissionOverwrites.edit(channel.guild.roles.everyone, {
+      SendMessages: false,
+    });
+    console.log("🔒 Канал заблокирован (rate limit)");
+  } catch (err) {
+    console.error("Ошибка блокировки канала:", err.message);
+  }
+}
+
+async function unlockChannel(channel) {
+  try {
+    await channel.permissionOverwrites.edit(channel.guild.roles.everyone, {
+      SendMessages: null,
+    });
+    console.log("🔓 Канал разблокирован (токены восстановлены)");
+  } catch (err) {
+    console.error("Ошибка разблокировки канала:", err.message);
+  }
+}
+
+async function sendRateLimitMessage(channel) {
+  try {
+    await channel.send({
+      flags: IS_COMPONENTS_V2,
+      components: [
+        {
+          type: TEXT_DISPLAY_TYPE,
+          content: RATE_LIMIT_MSG,
+        },
+      ],
+    });
+  } catch (err) {
+    // Фолбэк — обычное сообщение если Components V2 не поддерживается
+    console.error("Components V2 ошибка, используем обычное сообщение:", err.message);
+    try {
+      await channel.send(RATE_LIMIT_MSG);
+    } catch (e) {
+      console.error("Не удалось отправить сообщение о rate limit:", e.message);
+    }
+  }
+}
+
+function startRecoveryCheck(groq, channel) {
+  if (recoveryTimer) clearInterval(recoveryTimer);
+
+  recoveryTimer = setInterval(async () => {
+    if (!isRateLimited) {
+      clearInterval(recoveryTimer);
+      recoveryTimer = null;
+      return;
+    }
+
+    console.log("🔄 Проверяю восстановление токенов Groq...");
+    try {
+      await groq.chat.completions.create({
+        model: "llama-3.3-70b-versatile",
+        max_tokens: 5,
+        messages: [{ role: "user", content: "ping" }],
+      });
+
+      // Запрос прошёл — токены восстановились
+      isRateLimited = false;
+      rateLimitedChannel = null;
+      clearInterval(recoveryTimer);
+      recoveryTimer = null;
+      await unlockChannel(channel);
+    } catch (err) {
+      const status = err?.status ?? err?.response?.status;
+      if (status === 429) {
+        console.log("⏳ Токены ещё не восстановились, жду ещё 30 мин...");
+      } else {
+        console.error("Ошибка проверки восстановления:", err.message);
+      }
+    }
+  }, CHECK_INTERVAL_MS);
+}
+
 const token = process.env.DISCORD_BOT_TOKEN;
 const groqApiKey = process.env.GROQ_API_KEY;
 
@@ -120,7 +210,11 @@ if (!groqApiKey) { console.error("GROQ_API_KEY не задан"); process.exit(1
 
 const groq = new Groq({ apiKey: groqApiKey });
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
 });
 
 const history = [];
@@ -135,6 +229,7 @@ client.once(Events.ClientReady, (r) => {
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) return;
   if (message.channelId !== ALLOWED_CHANNEL_ID) return;
+  if (isRateLimited) return;
 
   const isMentioned = client.user != null && message.mentions.has(client.user);
   let isReply = false;
@@ -160,7 +255,7 @@ client.on(Events.MessageCreate, async (message) => {
 
     const recentHistory = history.slice(-10);
     const res = await groq.chat.completions.create({
-      model: "llama-3.1-8b-instant",
+      model: "llama-3.3-70b-versatile",
       max_tokens: 400,
       messages: [{ role: "system", content: buildPrompt(userText) }, ...recentHistory],
     });
@@ -174,8 +269,20 @@ client.on(Events.MessageCreate, async (message) => {
     if (aggressive) enrichDB(groq, reply, userText);
   } catch (err) {
     clearInterval(typingInterval);
-    console.error("Response error:", err);
-    await message.reply("что-то сломалось, попробуй ещё раз");
+
+    const status = err?.status ?? err?.response?.status;
+
+    if (status === 429) {
+      console.log("⚠️ Rate limit 429 — блокирую канал");
+      isRateLimited = true;
+      rateLimitedChannel = message.channel;
+      await sendRateLimitMessage(message.channel);
+      await lockChannel(message.channel);
+      startRecoveryCheck(groq, message.channel);
+    } else {
+      console.error("Response error:", err);
+      await message.reply("что-то сломалось, попробуй ещё раз").catch(() => {});
+    }
   }
 });
 
