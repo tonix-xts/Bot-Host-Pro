@@ -80,7 +80,7 @@ function buildPrompt(userText) {
 async function enrichDB(groq, reply, userText) {
   try {
     const res = await groq.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
+      model: "llama-3.1-8b-instant",
       max_tokens: 350,
       messages: [
         {
@@ -158,10 +158,11 @@ client.on(Events.MessageCreate, async (message) => {
 
     history.push({ role: "user", content: `${message.author.username}: ${userText}` });
 
+    const recentHistory = history.slice(-10);
     const res = await groq.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
+      model: "llama-3.1-8b-instant",
       max_tokens: 400,
-      messages: [{ role: "system", content: buildPrompt(userText) }, ...history],
+      messages: [{ role: "system", content: buildPrompt(userText) }, ...recentHistory],
     });
 
     clearInterval(typingInterval);
