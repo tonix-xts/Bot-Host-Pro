@@ -1,0 +1,6 @@
+- type: worker
+    name: discord-ai-bot
+    runtime: node
+    rootDir: discord-ai-bot
+    buildCommand: npm install
+    startCommand: node index.js
