@@ -1,6 +1,6 @@
 import "dotenv/config";
 import { Client, GatewayIntentBits, Events } from "discord.js";
-import OpenAI from "openai";
+import Groq from "groq-sdk";
 
 const ALLOWED_CHANNEL_ID = "1487101381763666021";
 
@@ -18,23 +18,19 @@ const SYSTEM_PROMPT = `Ты — девушка по имени Катя. Тво�
 - Максимум 5 строк в ответе. Не больше.`;
 
 const token = process.env.DISCORD_BOT_TOKEN;
-const openaiApiKey = process.env.OPENAI_API_KEY;
-const openaiBaseUrl = process.env.OPENAI_BASE_URL || process.env.AI_INTEGRATIONS_OPENAI_BASE_URL;
+const groqApiKey = process.env.GROQ_API_KEY;
 
 if (!token) {
   console.error("Ошибка: DISCORD_BOT_TOKEN не задан");
   process.exit(1);
 }
 
-if (!openaiApiKey) {
-  console.error("Ошибка: OPENAI_API_KEY не задан");
+if (!groqApiKey) {
+  console.error("Ошибка: GROQ_API_KEY не задан");
   process.exit(1);
 }
 
-const openai = new OpenAI({
-  apiKey: openaiApiKey,
-  ...(openaiBaseUrl ? { baseURL: openaiBaseUrl } : {}),
-});
+const groq = new Groq({ apiKey: groqApiKey });
 
 const client = new Client({
   intents: [
@@ -84,8 +80,8 @@ client.on(Events.MessageCreate, async (message) => {
       content: `${message.author.username}: ${userText}`,
     });
 
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o",
+    const response = await groq.chat.completions.create({
+      model: "llama-3.3-70b-versatile",
       max_tokens: 400,
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
